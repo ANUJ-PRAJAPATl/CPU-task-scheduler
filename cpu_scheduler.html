@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CPU Task Scheduler</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#1c2430;--mut:#667085;--bd:#e2e5ea;--ac:#3b6ef5;--idle:#9aa3b2}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1d2128;--tx:#e8eaee;--mut:#98a1b0;--bd:#2d333d;--ac:#6b93ff;--idle:#4a5261}}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--tx);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.4}
+.wrap{max-width:900px;margin:0 auto}
+h1{font-size:22px;margin:0 0 2px}
+.sub{color:var(--mut);font-size:13px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:14px}
+h2{font-size:15px;margin:0 0 10px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end}
+label{display:flex;flex-direction:column;font-size:12px;color:var(--mut);gap:3px}
+input,select{font:inherit;color:var(--tx);background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:8px;width:100px}
+select{width:auto;min-width:200px}
+button{font:inherit;border:1px solid var(--bd);background:var(--bg);color:var(--tx);border-radius:8px;padding:8px 12px;cursor:pointer}
+button.pri{background:var(--ac);border-color:var(--ac);color:#fff}
+button.sm{padding:3px 8px;font-size:12px}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--bd);white-space:nowrap}
+th{color:var(--mut);font-weight:600;font-size:12px}
+.gantt{display:flex;min-width:100%;padding-bottom:22px}
+.seg{position:relative;min-width:44px;height:42px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:600;font-size:13px;border-right:2px solid var(--card)}
+.seg.idle{background:var(--idle)}
+.seg span{position:absolute;bottom:-20px;font-size:11px;font-weight:400;color:var(--mut)}
+.seg .s{left:0}.seg .e{right:0}
+.stats{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+.stat{flex:1;min-width:150px;background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:10px}
+.stat b{display:block;font-size:20px}
+.stat small{color:var(--mut)}
+.msg{color:#d33;font-size:13px;min-height:18px;margin-top:8px}
+.empty{color:var(--mut);font-size:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>CPU Task Scheduler</h1>
+<div class="sub">Round Robin and Priority scheduling. Lower priority number = higher priority.</div>
+
+<div class="card">
+<h2>1. Add process</h2>
+<div class="row">
+<label>PID<input id="pid" type="number" min="1"></label>
+<label>Arrival<input id="at" type="number" min="0"></label>
+<label>Burst<input id="bt" type="number" min="1"></label>
+<label>Priority<input id="pr" type="number" min="0"></label>
+<button class="pri" onclick="onAdd()">Add</button>
+<button onclick="loadSample()">Load sample</button>
+<button onclick="onClear()">Clear all</button>
+</div>
+<div class="msg" id="msg"></div>
+<div class="scroll" id="plist"></div>
+</div>
+
+<div class="card">
+<h2>2. Run scheduler</h2>
+<div class="row">
+<label>Algorithm
+<select id="algo" onchange="toggleQ()">
+<option value="rr">Round Robin</option>
+<option value="pnp">Priority (Non-Preemptive)</option>
+<option value="pp">Priority (Preemptive)</option>
+</select></label>
+<label id="qbox">Time quantum<input id="q" type="number" min="1" value="3"></label>
+<button class="pri" onclick="runScheduler()">Run</button>
+</div>
+</div>
+
+<div class="card" id="out" style="display:none">
+<div class="sub" id="badge"></div>
+<h2>Gantt chart</h2>
+<div class="scroll"><div class="gantt" id="gantt"></div></div>
+<div class="stats" id="stats"></div>
+<h2 style="margin-top:16px">Results</h2>
+<div class="scroll" id="result"></div>
+</div>
+</div>
+
+<script>
+/* ============ DATA STRUCTURE 1: LINKED LIST (all processes) ============ */
+var head = null, tail = null;
+
+function addNode(p) {
+  var node = { data: p, next: null };
+  if (head === null) { head = node; tail = node; }
+  else { tail.next = node; tail = node; }
+}
+function removeNode(pid) {
+  var cur = head, prev = null;
+  while (cur !== null) {
+    if (cur.data.pid === pid) {
+      if (prev === null) head = cur.next; else prev.next = cur.next;
+      if (cur === tail) tail = prev;
+      return;
+    }
+    prev = cur; cur = cur.next;
+  }
+}
+function findNode(pid) {
+  for (var c = head; c !== null; c = c.next) if (c.data.pid === pid) return c;
+  return null;
+}
+function listToArray() {
+  var a = [];
+  for (var c = head; c !== null; c = c.next) a.push(c.data);
+  return a;
+}
+
+/* ============ DATA STRUCTURE 2: CIRCULAR QUEUE (Round Robin) ============ */
+var cq = new Array(100), cfront = 0, crear = -1, csize = 0;
+
+function cqInit() { cfront = 0; crear = -1; csize = 0; }
+function cqEnqueue(p) {
+  if (csize === 100) return;
+  crear = (crear + 1) % 100;
+  cq[crear] = p;
+  csize++;
+}
+function cqDequeue() {
+  if (csize === 0) return null;
+  var p = cq[cfront];
+  cfront = (cfront + 1) % 100;
+  csize--;
+  return p;
+}
+
+/* ============ DATA STRUCTURE 3: PRIORITY QUEUE (min-heap) ============ */
+var heap = [null], hsize = 0;   /* index starts from 1 */
+
+function better(a, b) {
+  if (a.priority !== b.priority) return a.priority < b.priority;
+  if (a.arrival !== b.arrival) return a.arrival < b.arrival;
+  return a.pid < b.pid;
+}
+function heapInit() { heap = [null]; hsize = 0; }
+function heapPush(p) {
+  var i, t;
+  hsize++; i = hsize; heap[i] = p;
+  while (i > 1 && better(heap[i], heap[Math.floor(i / 2)])) {
+    t = heap[i]; heap[i] = heap[Math.floor(i / 2)]; heap[Math.floor(i / 2)] = t;
+    i = Math.floor(i / 2);
+  }
+}
+function heapPop() {
+  if (hsize === 0) return null;
+  var top = heap[1], i = 1, l, r, s, t;
+  heap[1] = heap[hsize]; hsize--;
+  while (true) {
+    l = 2 * i; r = 2 * i + 1; s = i;
+    if (l <= hsize && better(heap[l], heap[s])) s = l;
+    if (r <= hsize && better(heap[r], heap[s])) s = r;
+    if (s === i) break;
+    t = heap[i]; heap[i] = heap[s]; heap[s] = t;
+    i = s;
+  }
+  return top;
+}
+
+/* ============ SCHEDULER ============ */
+var segs = [];
+
+function addSeg(pid, start, end) {
+  var last = segs[segs.length - 1];
+  if (last && last.pid === pid && last.end === start) { last.end = end; return; }
+  segs.push({ pid: pid, start: start, end: end });   /* pid -1 = CPU idle */
+}
+
+function runScheduler() {
+  var algo = document.getElementById("algo").value;
+  var quantum = parseInt(document.getElementById("q").value, 10);
+  var arr = listToArray().map(function (p) {
+    return { pid: p.pid, arrival: p.arrival, burst: p.burst, priority: p.priority,
+             remaining: p.burst, completion: 0 };
+  });
+  if (arr.length === 0) { showMsg("Add at least one process first."); return; }
+  if (algo === "rr" && !(quantum >= 1)) { showMsg("Time quantum must be 1 or more."); return; }
+  showMsg("");
+
+  /* try the real C backend first (server.py); if it is not running, use the JS version */
+  fetch("/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ algo: algo, quantum: quantum, processes: listToArray() })
+  })
+    .then(function (r) { if (!r.ok) throw new Error("no backend"); return r.json(); })
+    .then(function (d) { segs = d.segments; render(d.processes); setBadge("Result computed by the C program"); })
+    .catch(function () { runJS(arr, algo, quantum); setBadge("Demo mode: computed in JavaScript (C backend not running)"); });
+}
+
+function runJS(arr, algo, quantum) {
+  arr.sort(function (a, b) { return a.arrival - b.arrival || a.pid - b.pid; });
+  segs = [];
+  cqInit(); heapInit();
+
+  var n = arr.length, time = 0, idx = 0, done = 0, p, run, next;
+  var push = (algo === "rr") ? cqEnqueue : heapPush;
+  var pop  = (algo === "rr") ? cqDequeue : heapPop;
+  var size = function () { return (algo === "rr") ? csize : hsize; };
+
+  while (done < n) {
+    while (idx < n && arr[idx].arrival <= time) { push(arr[idx]); idx++; }
+
+    if (size() === 0) {                      /* CPU idle till next arrival */
+      next = arr[idx].arrival;
+      addSeg(-1, time, next);
+      time = next;
+      continue;
+    }
+
+    p = pop();
+    if (algo === "rr") run = Math.min(quantum, p.remaining);
+    else if (algo === "pp") run = 1;         /* preemptive: re-check every tick */
+    else run = p.remaining;                  /* non-preemptive: run to the end */
+
+    addSeg(p.pid, time, time + run);
+    time += run;
+    p.remaining -= run;
+
+    while (idx < n && arr[idx].arrival <= time) { push(arr[idx]); idx++; }
+
+    if (p.remaining > 0) push(p);
+    else { p.completion = time; done++; }
+  }
+  render(arr);
+}
+
+/* ============ UI ============ */
+function $(id) { return document.getElementById(id); }
+function showMsg(t) { $("msg").textContent = t; }
+function setBadge(t) { $("badge").textContent = t; }
+function color(pid) { return pid < 0 ? "" : "hsl(" + ((pid * 47) % 360) + " 55% 45%)"; }
+
+function toggleQ() { $("qbox").style.display = $("algo").value === "rr" ? "flex" : "none"; }
+
+function onAdd() {
+  var pid = parseInt($("pid").value, 10), at = parseInt($("at").value, 10);
+  var bt = parseInt($("bt").value, 10), pr = parseInt($("pr").value, 10);
+  if (isNaN(pid) || isNaN(at) || isNaN(bt) || isNaN(pr)) { showMsg("Fill all four fields."); return; }
+  if (pid < 1 || at < 0 || bt < 1 || pr < 0) { showMsg("PID and burst must be 1 or more; arrival and priority 0 or more."); return; }
+  if (findNode(pid) !== null) { showMsg("PID " + pid + " already exists."); return; }
+  if (listToArray().length >= 100) { showMsg("Limit of 100 processes reached."); return; }
+  addNode({ pid: pid, arrival: at, burst: bt, priority: pr });
+  showMsg("");
+  $("pid").value = pid + 1; $("at").value = ""; $("bt").value = ""; $("pr").value = "";
+  renderList();
+}
+function onRemove(pid) { removeNode(pid); renderList(); }
+function onClear() { head = null; tail = null; renderList(); $("out").style.display = "none"; showMsg(""); }
+function loadSample() {
+  head = null; tail = null;
+  addNode({ pid: 1, arrival: 0, burst: 5, priority: 2 });
+  addNode({ pid: 2, arrival: 1, burst: 3, priority: 1 });
+  addNode({ pid: 3, arrival: 2, burst: 8, priority: 4 });
+  addNode({ pid: 4, arrival: 3, burst: 6, priority: 3 });
+  showMsg(""); renderList();
+}
+
+function renderList() {
+  var a = listToArray();
+  if (a.length === 0) { $("plist").innerHTML = '<p class="empty">No processes yet.</p>'; return; }
+  var h = "<table><tr><th>PID</th><th>Arrival</th><th>Burst</th><th>Priority</th><th></th></tr>";
+  a.forEach(function (p) {
+    h += "<tr><td>P" + p.pid + "</td><td>" + p.arrival + "</td><td>" + p.burst + "</td><td>" +
+         p.priority + '</td><td><button class="sm" onclick="onRemove(' + p.pid + ')">Remove</button></td></tr>';
+  });
+  $("plist").innerHTML = h + "</table>";
+}
+
+function render(arr) {
+  var g = "", i, s, w;
+  for (i = 0; i < segs.length; i++) {
+    s = segs[i];
+    g += '<div class="seg' + (s.pid < 0 ? " idle" : "") + '" style="flex:' + (s.end - s.start) +
+         ' 1 0;' + (s.pid < 0 ? "" : "background:" + color(s.pid)) + '">' +
+         (s.pid < 0 ? "IDLE" : "P" + s.pid) + '<span class="s">' + s.start + "</span>" +
+         (i === segs.length - 1 ? '<span class="e">' + s.end + "</span>" : "") + "</div>";
+  }
+  $("gantt").innerHTML = g;
+
+  var totW = 0, totT = 0;
+  arr.sort(function (a, b) { return a.pid - b.pid; });
+  var t = "<table><tr><th>PID</th><th>Arrival</th><th>Burst</th><th>Priority</th>" +
+          "<th>Completion</th><th>Turnaround</th><th>Waiting</th></tr>";
+  arr.forEach(function (p) {
+    var ta = p.completion - p.arrival, wt = ta - p.burst;
+    totT += ta; totW += wt;
+    t += "<tr><td>P" + p.pid + "</td><td>" + p.arrival + "</td><td>" + p.burst + "</td><td>" +
+         p.priority + "</td><td>" + p.completion + "</td><td>" + ta + "</td><td>" + wt + "</td></tr>";
+  });
+  $("result").innerHTML = t + "</table>";
+
+  $("stats").innerHTML =
+    '<div class="stat"><small>Average waiting time</small><b>' + (totW / arr.length).toFixed(2) + "</b></div>" +
+    '<div class="stat"><small>Average turnaround time</small><b>' + (totT / arr.length).toFixed(2) + "</b></div>" +
+    '<div class="stat"><small>Total time</small><b>' + segs[segs.length - 1].end + "</b></div>";
+  $("out").style.display = "block";
+}
+
+renderList();
+toggleQ();
+</script>
+</body>
+</html>
